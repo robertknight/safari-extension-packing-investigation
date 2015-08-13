@@ -1,0 +1,9 @@
+[package]
+name = "xartool"
+version = "0.1.0"
+authors = ["Robert Knight <robertknight@gmail.com>"]
+
+[dependencies]
+byteorder = "*"
+flate2 = "0.2.7"
+sxd-document = "*"
