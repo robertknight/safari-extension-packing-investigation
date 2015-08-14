@@ -1,10 +1,11 @@
 extern crate byteorder;
 extern crate flate2;
+extern crate sha1;
 extern crate sxd_document;
 
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::error::Error;
-use std::str::FromStr;
+use std::str::{from_utf8, FromStr};
 
 use self::byteorder::{BigEndian, ReadBytesExt};
 use self::flate2::read::ZlibDecoder;
@@ -22,24 +23,26 @@ pub struct Header {
 
 /// A reference to a location within the data
 /// section of the archive (the heap).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HeapRef {
-    pub size: u64,
-    pub offset: u64
+    pub offset: u64,
+    /// The size of the data _after_ decompression (if any)
+    pub size: u64
 }
 
 /// Metadata about a block of compressed data
 /// within the archive's heap.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HeapData {
     pub location: HeapRef,
+    /// The length of the file's compressed content
     pub length: u64,
     pub archived_checksum: String,
     pub extracted_checksum: String,
     pub encoding: Encoding
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Encoding {
     Gzip,
     Other
@@ -60,14 +63,14 @@ pub struct Signature {
     pub data: Vec<u8>
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FileType {
     File,
     Directory,
     Other
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct File {
     // FIXME - A file may be a normal file or directory,
     // this struct mirrors the XML but is not idiomatic Rust
@@ -77,9 +80,9 @@ pub struct File {
     pub data: Option<HeapData>,
 }
 
-#[derive(Debug)]
-pub struct Archive {
-    pub source: Box<Read+Seek>,
+pub struct Archive<R: Read+Seek> {
+    source: R,
+
     pub header: Header,
 
     pub checksum: Option<Checksum>,
@@ -94,14 +97,25 @@ const XAR_CHECKSUM_SHA1: u32 = 1;
 //const XAR_CHECKSUM_MD5: u32 = 2;
 //const XAR_CHECKSUM_OTHER: u32 = 3;
 
-fn read_toc<R: Read>(source: &mut R, len: u64) -> String {
-    let mut toc_data = vec![0u8; len as usize];
-    source.read(&mut toc_data).unwrap();
-    let toc_cursor = Cursor::new(toc_data);
-    let mut decoder = ZlibDecoder::new(toc_cursor);
-    let mut xml = String::new();
-    decoder.read_to_string(&mut xml);
-    xml
+fn to_hex(input: &[u8]) -> String {
+    let mut s = String::new();
+    for b in input.iter() {
+        s.push_str(&format!("{:02x}", *b));
+    }
+    return s;
+}
+
+fn sha1_digest(input: &[u8]) -> String {
+    let mut digest = sha1::Sha1::new();
+    digest.update(input);
+    digest.hexdigest()
+}
+
+fn read_heap<R: Read + Seek>(source: &mut R, offset: u64, len: u64) -> Vec<u8> {
+    let mut data = vec![0u8; len as usize];
+    source.seek(SeekFrom::Start(offset));
+    source.read(&mut data).unwrap();
+    data
 }
 
 struct ChildElementIterator<'d> {
@@ -253,9 +267,16 @@ fn parse_file<'d>(elt: Element<'d>) -> File {
     file
 }
 
-impl Archive {
-    pub fn open<Source>(mut source: Source) -> Result<Archive, Box<Error>>
-      where Source: Read + Seek {
+fn decompress_zlib(data: &[u8]) -> Vec<u8> {
+    let cursor = Cursor::new(data);
+    let mut decoder = ZlibDecoder::new(cursor);
+    let mut buf = Vec::new();
+    decoder.read_to_end(&mut buf);
+    buf
+}
+
+impl <R:Read+Seek> Archive<R> {
+    pub fn open(mut source: R) -> Result<Archive<R>, Box<Error>> {
           // read header
           let header = Header {
             magic: try!(source.read_u32::<BigEndian>()),
@@ -279,9 +300,13 @@ impl Archive {
           }
 
           // read table of contents, checksum and signature
-          source.seek(SeekFrom::Start(header.size as u64));
-          let toc_xml = read_toc(&mut source,
-                                 header.toc_length_compressed).replace("encoding=\"UTF-8\"","");
+          let toc_data = read_heap(&mut source, header.size as u64, header.toc_length_compressed);
+          let toc_cursor = Cursor::new(toc_data);
+          let mut decoder = ZlibDecoder::new(toc_cursor);
+          let mut toc_xml = String::new();
+          decoder.read_to_string(&mut toc_xml);
+          toc_xml = toc_xml.replace("encoding=\"UTF-8\"","");
+
           let xml_parser = sxd_document::parser::Parser::new();
           let toc_package = match xml_parser.parse(&toc_xml) {
               Ok(package) => package,
@@ -302,22 +327,21 @@ impl Archive {
           }).unwrap().element();
           let toc_root = find_child(xar_root.unwrap(), "toc").unwrap();
 
+          let heap_offset = (header.size as u64) + header.toc_length_compressed;
+
           for toc_element in toc_root.children() {
               if let ChildOfElement::Element(child_elt) = toc_element {
                   match child_elt.name().local_part() {
                       "checksum" => {
                           let mut checksum = parse_checksum(child_elt);
-                          checksum.data = vec![0u8; checksum.location.size as usize];
-                          source.seek(SeekFrom::Start((header.size as u64) +
-                                                      checksum.location.offset));
-                          source.read(&mut checksum.data);
+                          checksum.data = read_heap(&mut source, heap_offset + checksum.location.offset,
+                                                    checksum.location.size);
                           archive_checksum = Some(checksum);
                       },
                       "signature" => {
                           let mut sig = parse_signature(child_elt);
-                          sig.data = vec![0u8; sig.location.size as usize];
-                          source.seek(SeekFrom::Start((header.size as u64) + sig.location.offset));
-                          source.read(&mut sig.data);
+                          sig.data = read_heap(&mut source, heap_offset + sig.location.offset,
+                                               sig.location.size);
                           archive_signature = Some(sig)
                       },
                       "file" => {
@@ -329,12 +353,93 @@ impl Archive {
           }
 
           let archive = Archive {
+              source: source,
               header: header,
               checksum: archive_checksum,
               signature: archive_signature,
               files: files
           };
           Ok(archive)
+    }
+
+    fn heap_offset(&self) -> u64 {
+        self.header.size as u64 + self.header.toc_length_compressed
+    }
+
+    fn verify_file_tree(&mut self, file: &File) -> Result<(),Vec<String>> {
+        let mut errs: Vec<String> = Vec::new();
+        match file.file_type {
+            FileType::Directory => {
+                for dir_file in &file.children {
+                    match self.verify_file_tree(dir_file) {
+                        Ok(_) => (),
+                        Err(sub_tree_errs) => errs.extend(sub_tree_errs.iter().cloned())
+                    }
+                }
+            },
+            FileType::File => {
+                if let Some(ref file_data_ref) = file.data {
+                    let heap_offset = self.heap_offset();
+                    let file_data = read_heap(&mut self.source, heap_offset +
+                                              file_data_ref.location.offset,
+                                              file_data_ref.length);
+                    let archived_digest = sha1_digest(&file_data);
+
+                    if archived_digest != file_data_ref.archived_checksum {
+                        errs.push(format!("Digest mismatch for {}. Expected {}, actual {}",
+                                          file.name, file_data_ref.archived_checksum, archived_digest));
+                    }
+
+                    let decompressed_file_data = decompress_zlib(&file_data);
+                    let extracted_digest = sha1_digest(&decompressed_file_data);
+
+                    if extracted_digest != file_data_ref.extracted_checksum {
+                        errs.push(format!("Extracted digest mismatch for {}. Expected {}, actual {}",
+                                          file.name, file_data_ref.extracted_checksum, extracted_digest));
+                    }
+                }
+            },
+            FileType::Other => ()
+        }
+        match errs.len() {
+            0 => Ok(()),
+            _ => Err(errs)
+        }
+    }
+
+    pub fn verify(&mut self) -> Result<(),String> {
+        // verify TOC checksum
+        if let Some(ref checksum) = self.checksum {
+            let toc_data = read_heap(&mut self.source, self.header.size as u64,
+                                     self.header.toc_length_compressed);
+            let toc_digest = sha1_digest(&toc_data);
+            let expected_checksum = to_hex(&checksum.data);
+
+            if toc_digest != expected_checksum {
+                return Err(format!("Checksum mismatch. Expected {}, actual {}", expected_checksum,
+                                   toc_digest));
+            }
+        }
+
+        // verify file data
+        let files = self.files.clone();
+        let mut verify_errs: Vec<String> = Vec::new();
+        for file in files.iter() {
+            match self.verify_file_tree(file) {
+                Ok(_) => (),
+                Err(errs) => verify_errs.extend(errs.iter().cloned())
+            }
+        }
+        if verify_errs.len() > 0 {
+            return Err(verify_errs.connect(", "));
+        }
+
+        // verify signature
+        if let Some(_) = self.signature {
+            println!("TODO - Verify signature")
+        }
+
+        Ok(())
     }
 }
 

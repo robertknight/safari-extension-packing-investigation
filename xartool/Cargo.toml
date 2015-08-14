@@ -7,3 +7,4 @@ authors = ["Robert Knight <robertknight@gmail.com>"]
 byteorder = "*"
 flate2 = "0.2.7"
 sxd-document = "*"
+sha1 = "*"
