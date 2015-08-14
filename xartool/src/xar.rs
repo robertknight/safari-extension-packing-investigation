@@ -3,13 +3,15 @@ extern crate flate2;
 extern crate sha1;
 extern crate sxd_document;
 
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::error::Error;
 use std::str::{from_utf8, FromStr};
 
 use self::byteorder::{BigEndian, ReadBytesExt};
 use self::flate2::read::ZlibDecoder;
 use self::sxd_document::dom::{ChildOfRoot, ChildOfElement, Element};
+
+use std::fs;
 
 #[derive(Debug)]
 pub struct Header {
@@ -301,6 +303,9 @@ impl <R:Read+Seek> Archive<R> {
 
           // read table of contents, checksum and signature
           let toc_data = read_heap(&mut source, header.size as u64, header.toc_length_compressed);
+          let mut toc_out_file = try!(fs::File::create("toc.dat"));
+          try!(toc_out_file.write(&toc_data));
+
           let toc_cursor = Cursor::new(toc_data);
           let mut decoder = ZlibDecoder::new(toc_cursor);
           let mut toc_xml = String::new();

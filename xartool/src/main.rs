@@ -4,8 +4,9 @@ use std::fs::File;
 use std::path::Path;
 
 fn main() {
-    println!("Hello, world!");
-    let path = Path::new("archive.xar");
+    let path_str = std::env::args().nth(1).unwrap();
+    let path = Path::new(&path_str);
+
     let file = File::open(path).unwrap();
     let mut archive = xar::Archive::open(file).unwrap();
     match archive.verify() {

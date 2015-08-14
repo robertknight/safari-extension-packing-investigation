@@ -85,15 +85,21 @@
                      ' ' + rootCertArg + ' ' + options.appleRootCer +
 		     ' --sig-offset sigoffset')
             })
+	    .then(function () {
+		// extract compressed table of contents as toc.dat
+		return exec('xartool ' + safariextzName);
+	    })
             .then(function () {
-                return exec('openssl rsautl -sign -inkey ' + options.privateKey + ' -in ' + path.join(temp, 'digest.dat') + ' -out ' + path.join(temp, 'signature.dat'));
+		return exec('openssl dgst -sha1 -sign ' + options.privateKey + ' toc.dat', {hide_stdout: true, encoding: 'binary'});
+            })
+            .then(function (signature) {
+		var sigFile = path.join(temp, 'signature.dat');
+		fs.writeFileSync(sigFile, signature, {encoding:'binary'});
+                return exec('xar --inject-sig ' + sigFile + ' -f ' + safariextzName);
             })
             .then(function () {
-                return exec('xar --inject-sig ' + path.join(temp, 'signature.dat') + ' -f ' + safariextzName);
-            })
-            .then(function () {
-                //fs.unlink(path.join(temp, 'signature.dat'));
-                //fs.unlink(path.join(temp, 'digest.dat'));
+                fs.unlink(path.join(temp, 'signature.dat'));
+                fs.unlink(path.join(temp, 'digest.dat'));
             });
     }
 
